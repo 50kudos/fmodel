@@ -5,6 +5,8 @@ import Dict exposing (Dict)
 import Html exposing (..)
 import Html.Attributes exposing (attribute, autofocus, class, classList, id, list, style, type_)
 import Html.Events exposing (onClick, preventDefaultOn)
+import Html.Keyed as Keyed
+import Html.Lazy exposing (lazy2)
 import Json.Decode as D exposing (Decoder, Value, succeed)
 import Json.Decode.Extra as DE
 import Json.Encode as E
@@ -215,28 +217,28 @@ viewModel : Fmodel -> Config msg -> Html msg
 viewModel ({ sch } as fmodel) ui =
     case sch.type_ of
         TRecord recordFields ->
-            viewFolder fmodel ui
+            lazy2 viewFolder fmodel ui
 
         TList sch_ ->
-            viewFolder fmodel ui
+            lazy2 viewFolder fmodel ui
 
         TTuple schs ->
-            viewFolder fmodel ui
+            lazy2 viewFolder fmodel ui
 
         TUnion schs ->
-            viewFolder fmodel ui
+            lazy2 viewFolder fmodel ui
 
         TLeaf leaf ->
-            viewLeaf fmodel ui
+            lazy2 viewLeaf fmodel ui
 
         TRef ref ->
-            viewLeaf fmodel ui
+            lazy2 viewLeaf fmodel ui
 
         TValue json ->
-            viewLeaf fmodel ui
+            lazy2 viewLeaf fmodel ui
 
         TAny ->
-            viewLeaf fmodel ui
+            lazy2 viewLeaf fmodel ui
 
 
 viewFolder : Fmodel -> Config msg -> Html msg
@@ -244,13 +246,13 @@ viewFolder fmodel ({ level, tab } as ui) =
     nav [ id ui.path, classList [ ( "sort-handle", True ), ( "bg-dark-gray rounded py-4 shadow", level == tab ) ] ]
         [ details [ attribute "open" "open" ]
             [ summary [ class "flex flex-col" ] [ viewFolderHeader fmodel ui ]
-            , article
+            , Keyed.node "article"
                 [ id ("moveable__" ++ ui.path)
                 , attribute "phx-hook" "moveable"
                 , attribute "data-indent" (String.concat [ String.fromFloat (toFloat (level + 1) * 1.25), "rem" ])
                 , classList [ ( "content-vis-auto", level == tab ) ]
                 ]
-                (viewItself fmodel ui)
+                (List.map (\html -> ( ui.path, html )) (viewItself fmodel ui))
             ]
         ]
 
