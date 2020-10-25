@@ -1,4 +1,4 @@
-module Main exposing (..)
+port module Main exposing (..)
 
 import Browser
 import Dict exposing (Dict)
@@ -10,6 +10,12 @@ import Html.Lazy exposing (lazy2)
 import Json.Decode as D exposing (Decoder, Value, succeed)
 import Json.Decode.Extra as DE
 import Json.Encode as E
+
+
+port stateUpdate : (D.Value -> msg) -> Sub msg
+
+
+port pub : E.Value -> Cmd msg
 
 
 type alias Fmodel =
@@ -169,7 +175,26 @@ init json =
                     in
                     [ Fmodel "null" null ]
     in
-    ( { models = Debug.log "Decode Ok" models }, Cmd.none )
+    ( { models = Debug.log "Init model" models }, Cmd.none )
+
+
+type alias PatchPayload =
+    { path : String
+    , sch : Sch
+    }
+
+
+postschDecoder : Decoder PatchPayload
+postschDecoder =
+    D.succeed PatchPayload
+        |> DE.andMap (D.field "path" D.string)
+        |> DE.andMap (D.field "sch" schDecoder)
+
+
+replaceSch : List Fmodel -> PatchPayload -> List Fmodel
+replaceSch fmodels { path, sch } =
+    -- TODO : write access(path)
+    [ Fmodel path sch ]
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -178,6 +203,16 @@ update msg model =
         Noop ->
             ( model, Cmd.none )
 
+        FileChange models ->
+            ( { model | models = models }, Cmd.none )
+
+        PostSch postsch ->
+            let
+                models =
+                    replaceSch model.models postsch
+            in
+            ( { model | models = models }, Cmd.none )
+
 
 
 --- View layer ---
@@ -185,6 +220,8 @@ update msg model =
 
 type Msg
     = Noop
+    | PostSch PatchPayload
+    | FileChange (List Fmodel)
 
 
 type alias Config msg =
@@ -208,7 +245,6 @@ viewModule model =
         , attribute "phx-hook" "moveable"
         , attribute "data-group" "body"
         , attribute "data-indent" "1.25rem"
-        , attribute "phx-update" "append"
         ]
         (List.map (\fmodel -> viewModel fmodel (toConfig fmodel.key)) model.models)
 
@@ -275,27 +311,27 @@ viewItself : Fmodel -> Config msg -> List (Html msg)
 viewItself ({ key, sch } as fmodel) ui =
     case sch.type_ of
         TRecord fields ->
-            viewRecord fields ui
+            viewRecord viewModel fields ui
 
         TList sch_ ->
             if sch_.type_ == TAny then
                 []
 
             else
-                viewList [ sch_ ] ui
+                viewList viewModel [ sch_ ] ui
 
         TTuple schs ->
-            viewList schs ui
+            viewList viewModel schs ui
 
         TUnion schs ->
-            viewUnion schs ui
+            viewUnion viewModel schs ui
 
         _ ->
             []
 
 
-viewRecord : RecordFields -> Config msg -> List (Html msg)
-viewRecord { fields, order } ui =
+viewRecord : (Fmodel -> Config msg -> a) -> RecordFields -> Config msg -> List a
+viewRecord mapFn { fields, order } ui =
     let
         nextUI k =
             { ui
@@ -304,44 +340,44 @@ viewRecord { fields, order } ui =
                 , path = ui.path ++ "[" ++ k ++ "]"
             }
 
-        viewNextModel k =
+        walk k =
             Dict.get k fields
                 |> Maybe.withDefault null
-                |> (\sch_ -> viewModel (Fmodel k sch_) (nextUI k))
+                |> (\sch_ -> mapFn (Fmodel k sch_) (nextUI k))
     in
-    List.map viewNextModel order
+    List.map walk order
 
 
-viewList : List Sch -> Config msg -> List (Html msg)
-viewList schs ui =
+viewList : (Fmodel -> Config msg -> a) -> List Sch -> Config msg -> List a
+viewList mapFn schs ui =
     let
         nextUI i =
             { ui | level = ui.level + 1, parentHead = listAny, path = ui.path ++ "[]" ++ "[" ++ i ++ "]" }
 
-        viewNextModel i sch_ =
+        walk i sch_ =
             let
                 index =
                     String.fromInt i
             in
-            viewModel (Fmodel index sch_) (nextUI index)
+            mapFn (Fmodel index sch_) (nextUI index)
     in
-    List.indexedMap viewNextModel schs
+    List.indexedMap walk schs
 
 
-viewUnion : List Sch -> Config msg -> List (Html msg)
-viewUnion schs ui =
+viewUnion : (Fmodel -> Config msg -> a) -> List Sch -> Config msg -> List a
+viewUnion mapFn schs ui =
     let
         nextUI i =
             { ui | level = ui.level + 1, parentHead = emptyUnion, path = ui.path ++ "[]" ++ "[" ++ i ++ "]" }
 
-        viewNextModel i sch_ =
+        walk i sch_ =
             let
                 index =
                     String.fromInt i
             in
-            viewModel (Fmodel index sch_) (nextUI index)
+            mapFn (Fmodel index sch_) (nextUI index)
     in
-    List.indexedMap viewNextModel schs
+    List.indexedMap walk schs
 
 
 viewLeaf : Fmodel -> Config msg -> Html msg
@@ -628,7 +664,14 @@ preventOnClick toMsg =
 
 subscriptions : Model -> Sub Msg
 subscriptions _ =
-    Sub.none
+    let
+        updateKind =
+            D.oneOf
+                [ D.map PostSch postschDecoder
+                , D.map FileChange schsDecoder
+                ]
+    in
+    stateUpdate (D.decodeValue updateKind >> Result.withDefault Noop)
 
 
 main : Program D.Value Model Msg
