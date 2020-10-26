@@ -57,9 +57,22 @@ type LeafType
     | TNull
 
 
-type alias Model =
-    { models : List Fmodel
+type alias SchFile =
+    { id : String
+    , sch : Sch
     }
+
+
+type alias Model =
+    { currentFile : SchFile
+    }
+
+
+schFileDecoder : Decoder SchFile
+schFileDecoder =
+    D.succeed SchFile
+        |> DE.andMap (D.field "id" D.string)
+        |> DE.andMap (D.field "schema" schDecoder)
 
 
 schsDecoder : Decoder (List Fmodel)
@@ -163,23 +176,24 @@ emptyUnion =
 init : D.Value -> ( Model, Cmd Msg )
 init json =
     let
-        models =
-            case D.decodeValue schsDecoder json of
-                Ok models_ ->
-                    models_
+        currentFile =
+            case D.decodeValue schFileDecoder json of
+                Ok modelFile ->
+                    modelFile
 
                 Err err ->
                     let
                         errMsg =
                             Debug.log "Decode Err" (D.errorToString err)
                     in
-                    [ Fmodel "null" null ]
+                    SchFile "" null
     in
-    ( { models = Debug.log "Init model" models }, Cmd.none )
+    ( { currentFile = Debug.log "Init" currentFile }, Cmd.none )
 
 
 type alias PatchPayload =
-    { path : String
+    { id : String
+    , path : String
     , sch : Sch
     }
 
@@ -187,14 +201,112 @@ type alias PatchPayload =
 postschDecoder : Decoder PatchPayload
 postschDecoder =
     D.succeed PatchPayload
+        |> DE.andMap (D.field "id" D.string)
         |> DE.andMap (D.field "path" D.string)
         |> DE.andMap (D.field "sch" schDecoder)
 
 
-replaceSch : List Fmodel -> PatchPayload -> List Fmodel
-replaceSch fmodels { path, sch } =
+replaceSch : Sch -> PatchPayload -> Sch
+replaceSch schema { path, sch } =
     -- TODO : write access(path)
-    [ Fmodel path sch ]
+    sch
+
+
+get : String -> String -> Sch -> Sch
+get fileId path sch =
+    let
+        acc =
+            { level = 0, parentHead = any, path = "", result = sch }
+
+        toReduce ( sch_, acc_ ) =
+            if "[" ++ path ++ "]" == acc_.path && acc_.level /= 0 then
+                { acc_ | result = Tuple.first ( sch_, acc_.result ) }
+
+            else
+                acc_
+    in
+    .result (reduce_ toReduce acc sch)
+
+
+reduce : (( Sch, b ) -> b) -> b -> Sch -> b
+reduce fun b sch =
+    let
+        acc =
+            { level = 0, parentHead = any, path = "", result = fun ( sch, b ) }
+
+        toReduce ( sch_, acc_ ) =
+            { acc_ | result = fun ( sch_, acc_.result ) }
+    in
+    .result (reduce_ toReduce acc sch)
+
+
+type alias Acc b =
+    { b | level : Int, parentHead : Sch, path : String }
+
+
+reduce_ : (( Sch, Acc b ) -> Acc b) -> Acc b -> Sch -> Acc b
+reduce_ fun acc sch =
+    case sch.type_ of
+        TRecord { fields, order } ->
+            let
+                nextAcc k acc_ =
+                    { acc_
+                        | level = acc.level + 1
+                        , parentHead = any
+                        , path = acc.path ++ "[" ++ k ++ "]"
+                    }
+
+                walk k acc_ =
+                    Dict.get k fields
+                        |> Maybe.withDefault null
+                        |> (\sch_ -> reduce_ fun (fun ( sch_, nextAcc k acc_ )) sch_)
+            in
+            List.foldl walk acc order
+
+        TList sch_ ->
+            let
+                nextAcc i acc_ =
+                    { acc_
+                        | level = acc.level + 1
+                        , parentHead = listAny
+                        , path = acc.path ++ "[]" ++ "[" ++ String.fromInt i ++ "]"
+                    }
+
+                walk ( i, sch__ ) acc_ =
+                    reduce_ fun (fun ( sch_, nextAcc i acc_ )) sch__
+            in
+            List.foldl walk acc (List.map2 Tuple.pair (List.range 0 0) [ sch_ ])
+
+        TTuple schs ->
+            let
+                nextAcc i acc_ =
+                    { acc_
+                        | level = acc.level + 1
+                        , parentHead = listAny
+                        , path = acc.path ++ "[]" ++ "[" ++ String.fromInt i ++ "]"
+                    }
+
+                walk ( i, sch_ ) acc_ =
+                    reduce_ fun (fun ( sch_, nextAcc i acc_ )) sch_
+            in
+            List.foldl walk acc (List.map2 Tuple.pair (List.range 0 (List.length schs - 1)) schs)
+
+        TUnion schs ->
+            let
+                nextAcc i acc_ =
+                    { acc_
+                        | level = acc.level + 1
+                        , parentHead = listAny
+                        , path = acc.path ++ "[]" ++ "[" ++ String.fromInt i ++ "]"
+                    }
+
+                walk ( i, sch_ ) acc_ =
+                    reduce_ fun (fun ( sch_, nextAcc i acc_ )) sch_
+            in
+            List.foldl walk acc (List.map2 Tuple.pair (List.range 0 (List.length schs - 1)) schs)
+
+        _ ->
+            fun ( sch, acc )
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -203,15 +315,25 @@ update msg model =
         Noop ->
             ( model, Cmd.none )
 
-        FileChange models ->
-            ( { model | models = models }, Cmd.none )
+        FileChange file ->
+            let
+                file_ =
+                    { file | sch = get file.id file.id file.sch }
+            in
+            ( { model | currentFile = file_ }, Cmd.none )
 
         PostSch postsch ->
             let
-                models =
-                    replaceSch model.models postsch
+                file =
+                    model.currentFile
+
+                newSchema =
+                    replaceSch file.sch postsch
+
+                newfile =
+                    { file | sch = newSchema }
             in
-            ( { model | models = models }, Cmd.none )
+            ( { model | currentFile = newfile }, Cmd.none )
 
 
 
@@ -221,7 +343,7 @@ update msg model =
 type Msg
     = Noop
     | PostSch PatchPayload
-    | FileChange (List Fmodel)
+    | FileChange SchFile
 
 
 type alias Config msg =
@@ -234,8 +356,11 @@ viewModule model =
         tab =
             1
 
-        toConfig modelNmae =
-            { level = tab, tab = tab, toMsg = Noop, parentHead = any, path = "[" ++ modelNmae ++ "]" }
+        initMeta =
+            { level = 0, tab = tab, toMsg = Noop, parentHead = any, path = "" }
+
+        modelFile =
+            model.currentFile
     in
     div
         [ id "model_root"
@@ -246,7 +371,7 @@ viewModule model =
         , attribute "data-group" "body"
         , attribute "data-indent" "1.25rem"
         ]
-        (List.map (\fmodel -> viewModel fmodel (toConfig fmodel.key)) model.models)
+        (viewItself (Fmodel modelFile.id modelFile.sch) initMeta)
 
 
 viewModel : Fmodel -> Config msg -> Html msg
@@ -668,7 +793,7 @@ subscriptions _ =
         updateKind =
             D.oneOf
                 [ D.map PostSch postschDecoder
-                , D.map FileChange schsDecoder
+                , D.map FileChange schFileDecoder
                 ]
     in
     stateUpdate (D.decodeValue updateKind >> Result.withDefault Noop)
