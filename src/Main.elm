@@ -179,7 +179,7 @@ init json =
         currentFile =
             case D.decodeValue schFileDecoder json of
                 Ok modelFile ->
-                    modelFile
+                    { modelFile | sch = get modelFile.id modelFile.sch }
 
                 Err err ->
                     let
@@ -212,8 +212,8 @@ replaceSch schema { path, sch } =
     sch
 
 
-get : String -> String -> Sch -> Sch
-get fileId path sch =
+get : String -> Sch -> Sch
+get path sch =
     let
         acc =
             { level = 0, parentHead = any, path = "", result = sch }
@@ -318,7 +318,7 @@ update msg model =
         FileChange file ->
             let
                 file_ =
-                    { file | sch = get file.id file.id file.sch }
+                    { file | sch = get file.id file.sch }
             in
             ( { model | currentFile = file_ }, Cmd.none )
 
@@ -353,20 +353,17 @@ type alias Config msg =
 viewModule : Model -> Html Msg
 viewModule model =
     let
-        tab =
-            1
-
         initMeta =
-            { level = 0, tab = tab, toMsg = Noop, parentHead = any, path = "" }
+            { level = 0, tab = 1, toMsg = Noop, parentHead = any, path = "" }
 
         modelFile =
             model.currentFile
     in
     div
-        [ id "model_root"
+        [ id modelFile.id
         , class "grid grid-cols-fit py-6 h-full gap-4 _model_number"
         , attribute "phx-capture-click" "select_sch"
-        , attribute "phx-value-paths" "model_root"
+        , attribute "phx-value-paths" modelFile.id
         , attribute "phx-hook" "moveable"
         , attribute "data-group" "body"
         , attribute "data-indent" "1.25rem"
