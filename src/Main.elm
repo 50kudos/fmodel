@@ -29,6 +29,7 @@ type alias Sch =
     , title : String
     , description : String
     , examples : List D.Value
+    , anchor : Maybe String
     }
 
 
@@ -63,9 +64,29 @@ type alias SchFile =
     }
 
 
+type alias AnchorsModels =
+    List ( String, String )
+
+
 type alias Model =
     { currentFile : SchFile
+    , anchorsModels : AnchorsModels
     }
+
+
+mainDecoder : Decoder Model
+mainDecoder =
+    D.succeed Model
+        |> DE.andMap (D.field "currentFile" schFileDecoder)
+        |> DE.andMap (D.field "anchorsModels" anchorsModelsDecoder)
+
+
+anchorsModelsDecoder : Decoder AnchorsModels
+anchorsModelsDecoder =
+    D.succeed Tuple.pair
+        |> DE.andMap (D.index 0 D.string)
+        |> DE.andMap (D.index 1 D.string)
+        |> D.list
 
 
 schFileDecoder : Decoder SchFile
@@ -85,16 +106,17 @@ schsDecoder =
 schDecoder : Decoder Sch
 schDecoder =
     D.succeed Sch
-        |> DE.andMap (D.oneOf [ tRecord, tList, tTuple, tUnion, tRef, tValue, tAny ])
+        |> DE.andMap (D.oneOf [ tRecord, tList, tTuple, tLeaf, tUnion, tRef, tValue, tAny ])
         |> DE.andMap (D.field "title" D.string |> DE.withDefault "")
         |> DE.andMap (D.field "description" D.string |> DE.withDefault "")
         |> DE.andMap (D.field "examples" (D.list D.value) |> DE.withDefault [])
+        |> DE.andMap (D.maybe (D.field "$anchor" D.string))
 
 
 tRecord : Decoder Type
 tRecord =
     D.succeed RecordFields
-        |> DE.when (D.field "type" D.string) (\t -> t == "object")
+        |> DE.when (D.field "type" D.string) ((==) "object")
         |> DE.andMap (D.field "properties" (D.dict (D.lazy (\_ -> schDecoder))))
         |> DE.andMap (D.field "order" (D.list D.string))
         |> D.map TRecord
@@ -103,21 +125,27 @@ tRecord =
 tList : Decoder Type
 tList =
     D.succeed TList
-        |> DE.when (D.field "type" D.string) (\t -> t == "array")
+        |> DE.when (D.field "type" D.string) ((==) "array")
         |> DE.andMap (D.field "items" (D.lazy (\_ -> schDecoder)))
 
 
 tTuple : Decoder Type
 tTuple =
     D.succeed TTuple
-        |> DE.when (D.field "type" D.string) (\t -> t == "array")
+        |> DE.when (D.field "type" D.string) ((==) "array")
         |> DE.andMap (D.field "items" (D.list (D.lazy (\_ -> schDecoder))))
+
+
+tLeaf : Decoder Type
+tLeaf =
+    D.succeed TLeaf
+        |> DE.andMap (D.field "type" D.string |> D.andThen (whichLeaf >> D.succeed))
 
 
 tUnion : Decoder Type
 tUnion =
     D.succeed TUnion
-        |> DE.andMap (D.field "any_of" (D.list (D.lazy (\_ -> schDecoder))))
+        |> DE.andMap (D.field "anyOf" (D.list (D.lazy (\_ -> schDecoder))))
 
 
 tRef : Decoder Type
@@ -137,12 +165,35 @@ tAny =
     D.succeed TAny
 
 
+whichLeaf : String -> LeafType
+whichLeaf t =
+    case t of
+        "string" ->
+            TString
+
+        "number" ->
+            TNumber
+
+        "integer" ->
+            TInteger
+
+        "boolean" ->
+            TBool
+
+        "null" ->
+            TNull
+
+        _ ->
+            TNull
+
+
 null : Sch
 null =
     { type_ = TLeaf TNull
     , title = ""
     , description = ""
     , examples = [ E.null ]
+    , anchor = Nothing
     }
 
 
@@ -152,6 +203,7 @@ any =
     , title = ""
     , description = ""
     , examples = []
+    , anchor = Nothing
     }
 
 
@@ -161,6 +213,7 @@ listAny =
     , title = ""
     , description = ""
     , examples = []
+    , anchor = Nothing
     }
 
 
@@ -170,25 +223,25 @@ emptyUnion =
     , title = ""
     , description = ""
     , examples = []
+    , anchor = Nothing
     }
 
 
 init : D.Value -> ( Model, Cmd Msg )
 init json =
-    let
-        currentFile =
-            case D.decodeValue schFileDecoder json of
-                Ok modelFile ->
-                    { modelFile | sch = get modelFile.id modelFile.sch }
+    case D.decodeValue mainDecoder json of
+        Ok model ->
+            let
+                currentFile =
+                    model.currentFile
 
-                Err err ->
-                    let
-                        errMsg =
-                            Debug.log "Decode Err" (D.errorToString err)
-                    in
-                    SchFile "" null
-    in
-    ( { currentFile = Debug.log "Init" currentFile }, Cmd.none )
+                newFile =
+                    { currentFile | sch = get currentFile.id currentFile.sch }
+            in
+            ( { currentFile = newFile, anchorsModels = model.anchorsModels }, Cmd.none )
+
+        Err err ->
+            ( { currentFile = SchFile "" null, anchorsModels = [] }, Cmd.none )
 
 
 type alias PatchPayload =
@@ -226,6 +279,20 @@ get path sch =
                 acc_
     in
     .result (reduce_ toReduce acc sch)
+
+
+modelRefs : Sch -> AnchorsModels
+modelRefs sch =
+    case sch.type_ of
+        TRecord { fields, order } ->
+            let
+                maybeAnchorModel ( modelName, sch_ ) =
+                    Maybe.map (\a -> ( a, modelName )) sch_.anchor
+            in
+            List.filterMap maybeAnchorModel (Dict.toList fields)
+
+        _ ->
+            []
 
 
 reduce : (( Sch, b ) -> b) -> b -> Sch -> b
@@ -315,12 +382,15 @@ update msg model =
         Noop ->
             ( model, Cmd.none )
 
-        FileChange file ->
+        FileChange newModel ->
             let
+                file =
+                    newModel.currentFile
+
                 file_ =
                     { file | sch = get file.id file.sch }
             in
-            ( { model | currentFile = file_ }, Cmd.none )
+            ( { model | currentFile = file_, anchorsModels = newModel.anchorsModels }, Cmd.none )
 
         PostSch postsch ->
             let
@@ -343,21 +413,21 @@ update msg model =
 type Msg
     = Noop
     | PostSch PatchPayload
-    | FileChange SchFile
+    | FileChange Model
 
 
 type alias Config msg =
-    { level : Int, tab : Int, toMsg : msg, parentHead : Sch, path : String }
+    { level : Int, tab : Int, toMsg : msg, parentHead : Sch, path : String, refs : AnchorsModels }
 
 
 viewModule : Model -> Html Msg
 viewModule model =
     let
-        initMeta =
-            { level = 0, tab = 1, toMsg = Noop, parentHead = any, path = "" }
-
         modelFile =
             model.currentFile
+
+        initMeta =
+            { level = 0, tab = 1, toMsg = Noop, parentHead = any, path = "", refs = model.anchorsModels }
     in
     div
         [ id modelFile.id
@@ -617,8 +687,13 @@ viewTopKey ({ sch } as fmodel) ui =
 viewTreeKey : Fmodel -> Config msg -> List (Html msg)
 viewTreeKey fmodel ui =
     case ui.parentHead.type_ of
-        TUnion _ ->
+        TLeaf _ ->
             [ viewKeyText fmodel ui
+            , span [ class "mx-2" ] [ text ":" ]
+            ]
+
+        TUnion _ ->
+            [ viewKeyText { fmodel | key = "" } ui
             , span [ class "mx-2 text-base text-gray-600" ] [ text "|" ]
             ]
 
@@ -629,11 +704,11 @@ viewTreeKey fmodel ui =
 
 
 viewKeyText : Fmodel -> Config msg -> Html msg
-viewKeyText sch ({ level, tab } as ui) =
+viewKeyText sch ui =
     p
         [ class ""
         , style "_max-width"
-            (if level == tab then
+            (if ui.level == 0 then
                 "24rem"
 
              else
@@ -654,7 +729,7 @@ viewKeyText_ { key } ui =
             span [ class "break-words text-gray-600" ] [ text "└" ]
 
         _ ->
-            if ui.level == ui.tab then
+            if ui.level == 0 then
                 -- TODO : "<%= Utils.word_break_html(@key) %>"
                 span [ class "break-words text-indigo-400" ] [ text key ]
 
@@ -722,19 +797,19 @@ viewTopType { sch } ui =
                 span [ class "" ] [ text "[any]" ]
 
             else
-                span [ class "cursor-pointer flex" ] [ text "<%= read_type(Sch.items(@sch), @ui) %>" ]
+                span [ class "cursor-pointer flex" ] [ typeText sch_ ui ]
 
         TTuple _ ->
             span [ class "self-center cursor-pointer select-none" ] [ text "( )" ]
 
         TLeaf _ ->
-            span [ class "" ] [ text "read_type(@sch, @ui)" ]
+            span [ class "" ] [ typeText sch ui ]
 
         TUnion _ ->
             span [ class "self-center cursor-pointer select-none" ] [ text "||" ]
 
         _ ->
-            span [ class "" ] [ text "<%= read_type(@sch, @ui) %>" ]
+            span [ class "" ] [ typeText sch ui ]
 
 
 viewTreeType : Fmodel -> Config msg -> Html msg
@@ -752,13 +827,13 @@ viewTreeType { sch } ui =
                 span [ class "" ] [ text "[any]" ]
 
             else
-                span [ class "cursor-pointer flex" ] [ text "<%= read_type(Sch.items(@sch), @ui) %>" ]
+                span [ class "cursor-pointer flex" ] [ text "[", typeText sch_ ui, text "]" ]
 
         TTuple _ ->
             span [ class "self-center cursor-pointer text-sm select-none" ] [ text "( )" ]
 
         TLeaf _ ->
-            span [ class "" ] [ text "read_type(@sch, @ui)" ]
+            span [ class "" ] [ typeText sch ui ]
 
         TUnion _ ->
             span [ class "self-center cursor-pointer select-none" ] [ text "||" ]
@@ -767,7 +842,90 @@ viewTreeType { sch } ui =
             span [ class "self-center cursor-pointer select-none" ] [ text "any" ]
 
         _ ->
-            span [ class "<%= error_class(assigns) %>" ] [ text "<%= read_type(@sch, @ui) %>" ]
+            span [ class "<%= error_class(assigns) %>" ] [ typeText sch ui ]
+
+
+
+{- refNmae : List (ModelName, AnchorId) -> Sch -> String
+   refNmae refPairs sch =
+-}
+
+
+typeText : Sch -> Config msg -> Html msg
+typeText sch ui =
+    let
+        refName ref =
+            Dict.fromList ui.refs
+                |> Dict.get (String.dropLeft 1 ref)
+                |> Maybe.withDefault "type#404"
+
+        scalarDecoder =
+            D.oneOf
+                [ D.string
+                , D.bool |> D.andThen (stringFromBool >> D.succeed)
+                , D.int |> D.andThen (String.fromInt >> D.succeed)
+                , D.float |> D.andThen (String.fromFloat >> D.succeed)
+                , D.null "null"
+                , D.succeed "value"
+                ]
+
+        valueTypeText json =
+            case D.decodeValue scalarDecoder json of
+                Ok "value" ->
+                    text "value"
+
+                Ok scalar ->
+                    span [ class "text-green-700" ] [ text ("\"" ++ scalar ++ "\"") ]
+
+                Err _ ->
+                    text "type#500"
+    in
+    case sch.type_ of
+        TRecord _ ->
+            text "record"
+
+        TList _ ->
+            text "list"
+
+        TTuple _ ->
+            text "tuple"
+
+        TUnion _ ->
+            text "union"
+
+        TLeaf TString ->
+            text "string"
+
+        TLeaf TNumber ->
+            text "number"
+
+        TLeaf TInteger ->
+            text "integer"
+
+        TLeaf TBool ->
+            text "bool"
+
+        TLeaf TNull ->
+            text "null"
+
+        TAny ->
+            text "any"
+
+        TRef ref ->
+            span [ class "text-indigo-400" ] [ text (refName ref) ]
+
+        TValue json ->
+            valueTypeText json
+
+
+stringFromBool : Bool -> String
+stringFromBool v =
+    case v of
+        True ->
+            "true"
+
+        False ->
+            "false"
 
 
 template : List (Html.Attribute msg) -> List (Html msg) -> Html msg
@@ -790,7 +948,7 @@ subscriptions _ =
         updateKind =
             D.oneOf
                 [ D.map PostSch postschDecoder
-                , D.map FileChange schFileDecoder
+                , D.map FileChange mainDecoder
                 ]
     in
     stateUpdate (D.decodeValue updateKind >> Result.withDefault Noop)
