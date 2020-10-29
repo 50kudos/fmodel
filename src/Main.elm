@@ -10,6 +10,7 @@ import Html.Lazy exposing (lazy2)
 import Json.Decode as D exposing (Decoder, Value, succeed)
 import Json.Decode.Extra as DE
 import Json.Encode as E
+import Regex
 
 
 port stateUpdate : (D.Value -> msg) -> Sub msg
@@ -707,7 +708,7 @@ viewKeyText : Fmodel -> Config msg -> Html msg
 viewKeyText sch ui =
     p
         [ class ""
-        , style "_max-width"
+        , style "_max-width: "
             (if ui.level == 0 then
                 "24rem"
 
@@ -730,12 +731,10 @@ viewKeyText_ { key } ui =
 
         _ ->
             if ui.level == 0 then
-                -- TODO : "<%= Utils.word_break_html(@key) %>"
-                span [ class "break-words text-indigo-400" ] [ text key ]
+                span [ class "break-words text-indigo-400" ] (wordBreak key)
 
             else
-                -- TODO : "<%= Utils.word_break_html(@key) %>"
-                span [ class "break-words text-gray-300 opacity-75" ] [ text key ]
+                span [ class "break-words text-gray-300 opacity-75" ] (wordBreak key)
 
 
 viewTextarea : Fmodel -> Config msg -> Html msg
@@ -912,7 +911,7 @@ typeText sch ui =
             text "any"
 
         TRef ref ->
-            span [ class "text-indigo-400" ] [ text (refName ref) ]
+            span [ class "text-indigo-400" ] (wordBreak (refName ref))
 
         TValue json ->
             valueTypeText json
@@ -926,6 +925,25 @@ stringFromBool v =
 
         False ->
             "false"
+
+
+wordBreak : String -> List (Html msg)
+wordBreak string =
+    let
+        break =
+            Regex.fromString "[A-Z][a-z]+|::|_|\\." |> Maybe.withDefault Regex.never
+
+        matched =
+            (Regex.find break string |> List.map .match) ++ [ "" ]
+
+        remained =
+            Regex.split break string
+    in
+    List.map2 (\m r -> [ m, r ]) matched remained
+        |> List.concat
+        |> List.filter ((/=) "")
+        |> List.map text
+        |> List.intersperse (wbr [] [])
 
 
 template : List (Html.Attribute msg) -> List (Html msg) -> Html msg
