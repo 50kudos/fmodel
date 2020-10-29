@@ -208,6 +208,16 @@ any =
     }
 
 
+anyRecord : Sch
+anyRecord =
+    { type_ = TRecord (RecordFields Dict.empty [])
+    , title = ""
+    , description = ""
+    , examples = []
+    , anchor = Nothing
+    }
+
+
 listAny : Sch
 listAny =
     { type_ = TList any
@@ -270,7 +280,7 @@ get : String -> Sch -> Sch
 get path sch =
     let
         acc =
-            { level = 0, parentHead = any, path = "", result = sch }
+            { level = 0, parentHead = anyRecord, path = "", result = sch }
 
         toReduce ( sch_, acc_ ) =
             if "[" ++ path ++ "]" == acc_.path && acc_.level /= 0 then
@@ -300,7 +310,7 @@ reduce : (( Sch, b ) -> b) -> b -> Sch -> b
 reduce fun b sch =
     let
         acc =
-            { level = 0, parentHead = any, path = "", result = fun ( sch, b ) }
+            { level = 0, parentHead = anyRecord, path = "", result = fun ( sch, b ) }
 
         toReduce ( sch_, acc_ ) =
             { acc_ | result = fun ( sch_, acc_.result ) }
@@ -317,23 +327,23 @@ reduce_ fun acc sch =
     case sch.type_ of
         TRecord { fields, order } ->
             let
-                nextAcc k acc_ =
+                putAcc k acc_ =
                     { acc_
                         | level = acc.level + 1
-                        , parentHead = any
+                        , parentHead = anyRecord
                         , path = acc.path ++ "[" ++ k ++ "]"
                     }
 
                 walk k acc_ =
                     Dict.get k fields
-                        |> Maybe.withDefault null
-                        |> (\sch_ -> reduce_ fun (fun ( sch_, nextAcc k acc_ )) sch_)
+                        |> Maybe.withDefault any
+                        |> (\sch_ -> reduce_ fun (fun ( sch_, putAcc k acc_ )) sch_)
             in
             List.foldl walk acc order
 
         TList sch_ ->
             let
-                nextAcc i acc_ =
+                putAcc i acc_ =
                     { acc_
                         | level = acc.level + 1
                         , parentHead = listAny
@@ -341,13 +351,13 @@ reduce_ fun acc sch =
                     }
 
                 walk ( i, sch__ ) acc_ =
-                    reduce_ fun (fun ( sch_, nextAcc i acc_ )) sch__
+                    reduce_ fun (fun ( sch_, putAcc i acc_ )) sch__
             in
             List.foldl walk acc (List.map2 Tuple.pair (List.range 0 0) [ sch_ ])
 
         TTuple schs ->
             let
-                nextAcc i acc_ =
+                putAcc i acc_ =
                     { acc_
                         | level = acc.level + 1
                         , parentHead = listAny
@@ -355,13 +365,13 @@ reduce_ fun acc sch =
                     }
 
                 walk ( i, sch_ ) acc_ =
-                    reduce_ fun (fun ( sch_, nextAcc i acc_ )) sch_
+                    reduce_ fun (fun ( sch_, putAcc i acc_ )) sch_
             in
             List.foldl walk acc (List.map2 Tuple.pair (List.range 0 (List.length schs - 1)) schs)
 
         TUnion schs ->
             let
-                nextAcc i acc_ =
+                putAcc i acc_ =
                     { acc_
                         | level = acc.level + 1
                         , parentHead = listAny
@@ -369,7 +379,7 @@ reduce_ fun acc sch =
                     }
 
                 walk ( i, sch_ ) acc_ =
-                    reduce_ fun (fun ( sch_, nextAcc i acc_ )) sch_
+                    reduce_ fun (fun ( sch_, putAcc i acc_ )) sch_
             in
             List.foldl walk acc (List.map2 Tuple.pair (List.range 0 (List.length schs - 1)) schs)
 
@@ -428,7 +438,7 @@ viewModule model =
             model.currentFile
 
         initMeta =
-            { level = 0, tab = 1, toMsg = Noop, parentHead = any, path = "", refs = model.anchorsModels }
+            { level = 0, tab = 1, toMsg = Noop, parentHead = anyRecord, path = "", refs = model.anchorsModels }
     in
     div
         [ id modelFile.id
@@ -529,13 +539,13 @@ viewRecord mapFn { fields, order } ui =
         nextUI k =
             { ui
                 | level = ui.level + 1
-                , parentHead = any
+                , parentHead = anyRecord
                 , path = ui.path ++ "[" ++ k ++ "]"
             }
 
         walk k =
             Dict.get k fields
-                |> Maybe.withDefault null
+                |> Maybe.withDefault any
                 |> (\sch_ -> mapFn (Fmodel k sch_) (nextUI k))
     in
     List.map walk order
