@@ -280,16 +280,36 @@ get : String -> Sch -> Sch
 get path sch =
     let
         acc =
-            { level = 0, parentHead = anyRecord, path = "", result = sch }
+            { level = 0, parentHead = anyRecord, path = "", result = Nothing, sch = sch }
 
-        toReduce ( sch_, acc_ ) =
-            if "[" ++ path ++ "]" == acc_.path && acc_.level /= 0 then
-                { acc_ | result = Tuple.first ( sch_, acc_.result ) }
+        toReduce sch_ acc_ =
+            let
+                accessPath =
+                    if acc_.level == 1 then
+                        "[" ++ path ++ "]"
+
+                    else
+                        path
+
+                currentSch =
+                    acc_.sch
+
+                mappedSch =
+                    currentSch
+
+                newAcc =
+                    { acc_ | sch = mappedSch }
+            in
+            {- TODO: implement Halt | Cont instead of checking Nothing which will visit all nodes even if a sch is already found -}
+            if accessPath == acc_.path && acc_.result == Nothing then
+                { newAcc | result = Just mappedSch }
 
             else
-                acc_
+                newAcc
     in
-    .result (reduce_ toReduce acc sch)
+    mapReduce toReduce sch acc
+        |> .result
+        |> Maybe.withDefault any
 
 
 modelRefs : Sch -> AnchorsModels
@@ -307,84 +327,147 @@ modelRefs sch =
 
 
 reduce : (( Sch, b ) -> b) -> b -> Sch -> b
-reduce fun b sch =
+reduce f b sch =
     let
         acc =
-            { level = 0, parentHead = anyRecord, path = "", result = fun ( sch, b ) }
+            { level = 0, parentHead = anyRecord, path = "", result = f ( sch, b ), sch = sch }
 
-        toReduce ( sch_, acc_ ) =
-            { acc_ | result = fun ( sch_, acc_.result ) }
+        toReduce sch_ acc_ =
+            { acc_ | result = f ( sch_, acc_.result ) }
     in
-    .result (reduce_ toReduce acc sch)
+    .result (mapReduce toReduce sch acc)
 
 
 type alias Acc b =
-    { b | level : Int, parentHead : Sch, path : String }
+    { b | level : Int, parentHead : Sch, path : String, sch : Sch }
 
 
-reduce_ : (( Sch, Acc b ) -> Acc b) -> Acc b -> Sch -> Acc b
-reduce_ fun acc sch =
-    case sch.type_ of
+mapReduce : (Sch -> Acc b -> Acc b) -> Sch -> Acc b -> Acc b
+mapReduce f sch acc =
+    case acc.sch.type_ of
         TRecord { fields, order } ->
             let
-                putAcc k acc_ =
+                putAcc k acc_ sch_ =
                     { acc_
                         | level = acc.level + 1
                         , parentHead = anyRecord
                         , path = acc.path ++ "[" ++ k ++ "]"
+                        , sch = sch_
                     }
 
-                walk k acc_ =
-                    Dict.get k fields
-                        |> Maybe.withDefault any
-                        |> (\sch_ -> reduce_ fun (fun ( sch_, putAcc k acc_ )) sch_)
+                reducer k sch_ ( schs, acc_ ) =
+                    let
+                        fAcc =
+                            f sch_ (putAcc k acc_ sch_)
+
+                        reducedAcc =
+                            mapReduce f fAcc.sch fAcc
+
+                        newSchs =
+                            ( k, fAcc.sch ) :: schs
+                    in
+                    ( newSchs, reducedAcc )
+
+                ( newFields, newAcc ) =
+                    Dict.foldl reducer ( [], acc ) fields
+
+                newRecord =
+                    TRecord (RecordFields (Dict.fromList newFields) order)
             in
-            List.foldl walk acc order
+            f sch { newAcc | sch = { sch | type_ = newRecord } }
 
         TList sch_ ->
             let
-                putAcc i acc_ =
+                putAcc i acc_ sch__ =
                     { acc_
                         | level = acc.level + 1
                         , parentHead = listAny
                         , path = acc.path ++ "[]" ++ "[" ++ String.fromInt i ++ "]"
+                        , sch = sch__
                     }
 
-                walk ( i, sch__ ) acc_ =
-                    reduce_ fun (fun ( sch_, putAcc i acc_ )) sch__
+                reducer i sch__ acc_ =
+                    let
+                        fAcc =
+                            f sch_ (putAcc i acc_ sch__)
+
+                        reducedAcc =
+                            mapReduce f fAcc.sch fAcc
+                    in
+                    ( fAcc.sch, reducedAcc )
+
+                ( newItem, newAcc ) =
+                    reducer 0 sch_ acc
+
+                newListItem =
+                    TList newItem
             in
-            List.foldl walk acc (List.map2 Tuple.pair (List.range 0 0) [ sch_ ])
+            f sch { newAcc | sch = { sch | type_ = newListItem } }
 
         TTuple schs ->
             let
-                putAcc i acc_ =
+                putAcc i acc_ sch__ =
                     { acc_
                         | level = acc.level + 1
                         , parentHead = listAny
                         , path = acc.path ++ "[]" ++ "[" ++ String.fromInt i ++ "]"
+                        , sch = sch__
                     }
 
-                walk ( i, sch_ ) acc_ =
-                    reduce_ fun (fun ( sch_, putAcc i acc_ )) sch_
+                reducer i sch_ ( schs_, acc_ ) =
+                    let
+                        fAcc =
+                            f sch_ (putAcc i acc_ sch_)
+
+                        reducedAcc =
+                            mapReduce f fAcc.sch fAcc
+
+                        newSchs =
+                            fAcc.sch :: schs_
+                    in
+                    ( newSchs, reducedAcc )
+
+                ( newItems, newAcc ) =
+                    List.foldl (\( i, sch_ ) -> reducer i sch_) ( [], acc ) (List.map2 Tuple.pair (List.range 0 (List.length schs)) schs)
+
+                newTuple =
+                    TTuple newItems
             in
-            List.foldl walk acc (List.map2 Tuple.pair (List.range 0 (List.length schs - 1)) schs)
+            f sch { newAcc | sch = { sch | type_ = newTuple } }
 
         TUnion schs ->
             let
-                putAcc i acc_ =
+                putAcc i acc_ sch__ =
                     { acc_
                         | level = acc.level + 1
                         , parentHead = listAny
                         , path = acc.path ++ "[]" ++ "[" ++ String.fromInt i ++ "]"
+                        , sch = sch__
                     }
 
-                walk ( i, sch_ ) acc_ =
-                    reduce_ fun (fun ( sch_, putAcc i acc_ )) sch_
+                reducer i sch_ ( schs_, acc_ ) =
+                    let
+                        fAcc =
+                            f sch_ (putAcc i acc_ sch_)
+
+                        reducedAcc =
+                            mapReduce f fAcc.sch fAcc
+
+                        newSchs =
+                            fAcc.sch :: schs_
+                    in
+                    ( newSchs, reducedAcc )
+
+                ( newItems, newAcc ) =
+                    List.foldl (\( i, sch_ ) -> reducer i sch_) ( [], acc ) (List.map2 Tuple.pair (List.range 0 (List.length schs)) schs)
+
+                newUnion =
+                    TUnion newItems
             in
-            List.foldl walk acc (List.map2 Tuple.pair (List.range 0 (List.length schs - 1)) schs)
+            f sch { newAcc | sch = { sch | type_ = newUnion } }
 
         _ ->
-            fun ( sch, acc )
+            f sch { acc | sch = sch }
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
