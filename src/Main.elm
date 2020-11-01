@@ -271,45 +271,56 @@ postschDecoder =
 
 
 replaceSch : Sch -> PatchPayload -> Sch
-replaceSch schema { path, sch } =
-    -- TODO : write access(path)
-    sch
+replaceSch schema { id, path, sch } =
+    let
+        path_ =
+            String.replace id "" path
+    in
+    getAndUpdate path_ (always sch) schema |> Tuple.second
 
 
 get : String -> Sch -> Sch
 get path sch =
+    getAndUpdate path identity sch |> Tuple.first
+
+
+getAndUpdate : String -> (Sch -> Sch) -> Sch -> ( Sch, Sch )
+getAndUpdate path f sch =
     let
         acc =
-            { level = 0, parentHead = anyRecord, path = "", result = Nothing, sch = sch }
+            { level = 0, parentHead = anyRecord, path = "", result = Nothing, key = "", sch = sch }
 
         toReduce sch_ acc_ =
             let
                 accessPath =
-                    if acc_.level == 1 then
+                    if acc_.level == 1 && not (String.startsWith "[" path) then
                         "[" ++ path ++ "]"
 
                     else
                         path
 
-                currentSch =
-                    acc_.sch
-
                 mappedSch =
-                    currentSch
-
-                newAcc =
-                    { acc_ | sch = mappedSch }
+                    f acc_.sch
             in
             {- TODO: implement Halt | Cont instead of checking Nothing which will visit all nodes even if a sch is already found -}
             if accessPath == acc_.path && acc_.result == Nothing then
-                { newAcc | result = Just mappedSch }
+                { acc_ | result = Just mappedSch, sch = mappedSch }
 
             else
-                newAcc
+                acc_
+
+        newAcc =
+            mapReduce toReduce acc.sch acc
+
+        newSch =
+            newAcc.sch
+
+        postSch =
+            newAcc
+                |> .result
+                |> Maybe.withDefault any
     in
-    mapReduce toReduce sch acc
-        |> .result
-        |> Maybe.withDefault any
+    ( postSch, newSch )
 
 
 modelRefs : Sch -> AnchorsModels
@@ -326,20 +337,25 @@ modelRefs sch =
             []
 
 
-reduce : (( Sch, b ) -> b) -> b -> Sch -> b
+reduce : (Sch -> b -> b) -> b -> Sch -> b
 reduce f b sch =
     let
-        acc =
-            { level = 0, parentHead = anyRecord, path = "", result = f ( sch, b ), sch = sch }
-
         toReduce sch_ acc_ =
-            { acc_ | result = f ( sch_, acc_.result ) }
+            { acc_ | result = f sch_ acc_.result }
     in
-    .result (mapReduce toReduce sch acc)
+    { level = 0
+    , parentHead = anyRecord
+    , path = ""
+    , key = ""
+    , sch = sch
+    , result = f sch b
+    }
+        |> mapReduce toReduce sch
+        |> .result
 
 
 type alias Acc b =
-    { b | level : Int, parentHead : Sch, path : String, sch : Sch }
+    { b | level : Int, parentHead : Sch, path : String, key : String, sch : Sch }
 
 
 mapReduce : (Sch -> Acc b -> Acc b) -> Sch -> Acc b -> Acc b
@@ -352,6 +368,7 @@ mapReduce f sch acc =
                         | level = acc.level + 1
                         , parentHead = anyRecord
                         , path = acc.path ++ "[" ++ k ++ "]"
+                        , key = k
                         , sch = sch_
                     }
 
@@ -364,7 +381,7 @@ mapReduce f sch acc =
                             mapReduce f fAcc.sch fAcc
 
                         newSchs =
-                            ( k, fAcc.sch ) :: schs
+                            ( k, reducedAcc.sch ) :: schs
                     in
                     ( newSchs, reducedAcc )
 
@@ -383,6 +400,7 @@ mapReduce f sch acc =
                         | level = acc.level + 1
                         , parentHead = listAny
                         , path = acc.path ++ "[]" ++ "[" ++ String.fromInt i ++ "]"
+                        , key = String.fromInt i
                         , sch = sch__
                     }
 
@@ -394,7 +412,7 @@ mapReduce f sch acc =
                         reducedAcc =
                             mapReduce f fAcc.sch fAcc
                     in
-                    ( fAcc.sch, reducedAcc )
+                    ( reducedAcc.sch, reducedAcc )
 
                 ( newItem, newAcc ) =
                     reducer 0 sch_ acc
@@ -411,6 +429,7 @@ mapReduce f sch acc =
                         | level = acc.level + 1
                         , parentHead = listAny
                         , path = acc.path ++ "[]" ++ "[" ++ String.fromInt i ++ "]"
+                        , key = String.fromInt i
                         , sch = sch__
                     }
 
@@ -423,12 +442,14 @@ mapReduce f sch acc =
                             mapReduce f fAcc.sch fAcc
 
                         newSchs =
-                            fAcc.sch :: schs_
+                            reducedAcc.sch :: schs_
                     in
                     ( newSchs, reducedAcc )
 
                 ( newItems, newAcc ) =
-                    List.foldl (\( i, sch_ ) -> reducer i sch_) ( [], acc ) (List.map2 Tuple.pair (List.range 0 (List.length schs)) schs)
+                    schs
+                        |> List.indexedMap Tuple.pair
+                        |> List.foldr (\( k, v ) -> reducer k v) ( [], acc )
 
                 newTuple =
                     TTuple newItems
@@ -442,6 +463,7 @@ mapReduce f sch acc =
                         | level = acc.level + 1
                         , parentHead = listAny
                         , path = acc.path ++ "[]" ++ "[" ++ String.fromInt i ++ "]"
+                        , key = String.fromInt i
                         , sch = sch__
                     }
 
@@ -454,12 +476,14 @@ mapReduce f sch acc =
                             mapReduce f fAcc.sch fAcc
 
                         newSchs =
-                            fAcc.sch :: schs_
+                            reducedAcc.sch :: schs_
                     in
                     ( newSchs, reducedAcc )
 
                 ( newItems, newAcc ) =
-                    List.foldl (\( i, sch_ ) -> reducer i sch_) ( [], acc ) (List.map2 Tuple.pair (List.range 0 (List.length schs)) schs)
+                    schs
+                        |> List.indexedMap Tuple.pair
+                        |> List.foldr (\( k, v ) -> reducer k v) ( [], acc )
 
                 newUnion =
                     TUnion newItems
@@ -511,7 +535,7 @@ type Msg
 
 
 type alias Config msg =
-    { level : Int, tab : Int, toMsg : msg, parentHead : Sch, path : String, refs : AnchorsModels }
+    { fileId : String, level : Int, tab : Int, toMsg : msg, parentHead : Sch, path : String, refs : AnchorsModels }
 
 
 viewModule : Model -> Html Msg
@@ -521,7 +545,14 @@ viewModule model =
             model.currentFile
 
         initMeta =
-            { level = 0, tab = 1, toMsg = Noop, parentHead = anyRecord, path = "", refs = model.anchorsModels }
+            { fileId = modelFile.id
+            , level = 0
+            , tab = 1
+            , toMsg = Noop
+            , parentHead = anyRecord
+            , path = ""
+            , refs = model.anchorsModels
+            }
     in
     div
         [ id modelFile.id
@@ -697,7 +728,7 @@ viewAddButton ({ sch } as fmodel) ui =
                 [ class "px-2 bg-indigo-500 rounded cursor-pointer"
                 , attribute "phx-click" "add_field"
                 , attribute "phx-value-field" "Record"
-                , attribute "phx-value-path" ui.path
+                , attribute "phx-value-path" (ui.fileId ++ ui.path)
                 ]
                 [ text "+" ]
 
@@ -706,7 +737,7 @@ viewAddButton ({ sch } as fmodel) ui =
                 [ class "px-2 bg-indigo-500 rounded cursor-pointer"
                 , attribute "phx-click" "add_field"
                 , attribute "phx-value-field" "Record"
-                , attribute "phx-value-path" ui.path
+                , attribute "phx-value-path" (ui.fileId ++ ui.path)
                 ]
                 [ text "+" ]
 
@@ -715,7 +746,7 @@ viewAddButton ({ sch } as fmodel) ui =
                 [ class "px-2 bg-indigo-500 rounded cursor-pointer"
                 , attribute "phx-click" "add_field"
                 , attribute "phx-value-field" "Record"
-                , attribute "phx-value-path" ui.path
+                , attribute "phx-value-path" (ui.fileId ++ ui.path)
                 ]
                 [ text "+" ]
 
@@ -808,7 +839,7 @@ viewKeyText sch ui =
              else
                 "12rem"
             )
-        , attribute "phx-value-path" ui.path
+        , attribute "phx-value-path" (ui.fileId ++ ui.path)
         ]
         [ viewKeyText_ sch ui ]
 
@@ -851,7 +882,7 @@ viewTypeOptions fmodel ui =
                     , style "min-width" "30vw"
                     , attribute "phx-keyup" "change_type"
                     , attribute "phx-key" "Enter"
-                    , attribute "phx-value-path" ui.path
+                    , attribute "phx-value-path" (ui.fileId ++ ui.path)
                     ]
                     []
                 ]
