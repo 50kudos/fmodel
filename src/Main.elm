@@ -596,14 +596,14 @@ viewModel ({ sch } as fmodel) ui =
 
 viewFolder : Fmodel -> Config msg -> Html msg
 viewFolder fmodel ({ level, tab } as ui) =
-    nav [ id ui.path, classList [ ( "sort-handle", True ), ( "bg-dark-gray rounded py-4 shadow", level == tab ) ] ]
+    nav [ id ui.path, classList [ ( "sort-handle", True ), ( "bg-dark-gray rounded py-4 shadow", level == 1 ) ] ]
         [ details [ attribute "open" "open" ]
             [ summary [ class "flex flex-col" ] [ viewFolderHeader fmodel ui ]
             , Keyed.node "article"
                 [ id ("moveable__" ++ ui.path)
                 , attribute "phx-hook" "moveable"
                 , attribute "data-indent" (String.concat [ String.fromFloat (toFloat (level + 1) * 1.25), "rem" ])
-                , classList [ ( "content-vis-auto", level == tab ) ]
+                , classList [ ( "content-vis-auto", level == 1 ) ]
                 ]
                 (List.map (\html -> ( ui.path, html )) (viewItself fmodel ui))
             ]
@@ -699,7 +699,7 @@ viewUnion mapFn schs ui =
 
 viewLeaf : Fmodel -> Config msg -> Html msg
 viewLeaf fmodel ui =
-    nav [ id ui.path, classList [ ( "sort-handle", True ), ( "bg-dark-gray rounded py-4 shadow", ui.level == ui.tab ) ] ]
+    nav [ id ui.path, classList [ ( "sort-handle", True ), ( "bg-dark-gray rounded py-4 shadow", ui.level == 1 ) ] ]
         [ viewKeyTypePair fmodel ui ]
 
 
@@ -833,7 +833,7 @@ viewKeyText sch ui =
     p
         [ class ""
         , style "_max-width: "
-            (if ui.level == 0 then
+            (if ui.level == 1 then
                 "24rem"
 
              else
@@ -854,7 +854,7 @@ viewKeyText_ { key } ui =
             span [ class "break-words text-gray-600" ] [ text "└" ]
 
         _ ->
-            if ui.level == 0 then
+            if ui.level == 1 then
                 span [ class "break-words text-indigo-400" ] (wordBreak key)
 
             else
@@ -898,7 +898,7 @@ viewType fmodel ui =
 
 viewType_ : Fmodel -> Config msg -> Html msg
 viewType_ fmodel ui =
-    if ui.level == ui.tab then
+    if ui.level == 1 then
         viewTopType fmodel ui
 
     else
