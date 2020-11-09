@@ -559,7 +559,6 @@ viewModule model =
         , class "grid grid-cols-fit py-6 h-full gap-4 _model_number"
         , attribute "phx-capture-click" "select_sch"
         , attribute "phx-value-paths" modelFile.id
-        , attribute "phx-hook" "moveable"
         , attribute "data-group" "body"
         , attribute "data-indent" "1.25rem"
         ]
@@ -596,14 +595,11 @@ viewModel ({ sch } as fmodel) ui =
 
 viewFolder : Fmodel -> Config msg -> Html msg
 viewFolder fmodel ({ level, tab } as ui) =
-    nav [ id ui.path, classList [ ( "sort-handle", True ), ( "bg-dark-gray rounded py-4 shadow", level == 1 ) ] ]
+    li [ id ui.path, classList [ ( "sort-handle", True ), ( "bg-dark-gray rounded py-4 shadow", level == 1 ) ] ]
         [ details [ attribute "open" "open" ]
             [ summary [ class "flex flex-col" ] [ viewFolderHeader fmodel ui ]
-            , Keyed.node "article"
-                [ id ("moveable__" ++ ui.path)
-                , attribute "phx-hook" "moveable"
-                , attribute "data-indent" (String.concat [ String.fromFloat (toFloat (level + 1) * 1.25), "rem" ])
-                , classList [ ( "content-vis-auto", level == 1 ) ]
+            , Keyed.ul
+                [ attribute "data-indent" (String.concat [ String.fromFloat (toFloat (level + 1) * 1.25), "rem" ])
                 ]
                 (List.map (\html -> ( ui.path, html )) (viewItself fmodel ui))
             ]
@@ -699,7 +695,7 @@ viewUnion mapFn schs ui =
 
 viewLeaf : Fmodel -> Config msg -> Html msg
 viewLeaf fmodel ui =
-    nav [ id ui.path, classList [ ( "sort-handle", True ), ( "bg-dark-gray rounded py-4 shadow", ui.level == 1 ) ] ]
+    li [ id ui.path, classList [ ( "sort-handle", True ), ( "bg-dark-gray rounded py-4 shadow", ui.level == 1 ) ] ]
         [ viewKeyTypePair fmodel ui ]
 
 
@@ -892,7 +888,7 @@ viewTypeOptions fmodel ui =
 
 viewType : Fmodel -> Config msg -> Html msg
 viewType fmodel ui =
-    p [ class "text-blue-500 text-sm break-words", style "min-width" "2ch" ]
+    p [ class "text-blue-500 text-sm break-words", style "min-width" "5ch" ]
         [ viewType_ fmodel ui ]
 
 
