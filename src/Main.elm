@@ -6,7 +6,7 @@ import Html exposing (..)
 import Html.Attributes exposing (attribute, autofocus, class, classList, id, list, style, type_)
 import Html.Events exposing (onClick, preventDefaultOn)
 import Html.Keyed as Keyed
-import Html.Lazy exposing (lazy2)
+import Html.Lazy exposing (lazy, lazy2, lazy3)
 import Json.Decode as D exposing (Decoder, Value, succeed)
 import Json.Decode.Extra as DE
 import Json.Encode as E
@@ -61,7 +61,7 @@ type LeafType
 
 type alias SchFile =
     { id : String
-    , sch : Sch
+    , fmodels : List Fmodel
     }
 
 
@@ -94,14 +94,15 @@ schFileDecoder : Decoder SchFile
 schFileDecoder =
     D.succeed SchFile
         |> DE.andMap (D.field "id" D.string)
-        |> DE.andMap (D.field "schema" schDecoder)
+        |> DE.andMap (D.field "fmodels" schsDecoder)
 
 
 schsDecoder : Decoder (List Fmodel)
 schsDecoder =
-    D.dict schDecoder
-        |> D.map Dict.toList
-        |> D.map (\fmodels -> List.map (\( key, sch ) -> Fmodel key sch) fmodels)
+    D.succeed Fmodel
+        |> DE.andMap (D.index 0 D.string)
+        |> DE.andMap (D.index 1 schDecoder)
+        |> D.list
 
 
 schDecoder : Decoder Sch
@@ -242,17 +243,10 @@ init : D.Value -> ( Model, Cmd Msg )
 init json =
     case D.decodeValue mainDecoder json of
         Ok model ->
-            let
-                currentFile =
-                    model.currentFile
-
-                newFile =
-                    { currentFile | sch = get currentFile.id currentFile.sch }
-            in
-            ( { currentFile = newFile, anchorsModels = model.anchorsModels }, Cmd.none )
+            ( { currentFile = model.currentFile, anchorsModels = model.anchorsModels }, Cmd.none )
 
         Err err ->
-            ( { currentFile = SchFile "" null, anchorsModels = [] }, Cmd.none )
+            ( { currentFile = SchFile "" [], anchorsModels = [] }, Cmd.none )
 
 
 type alias PatchPayload =
@@ -501,25 +495,17 @@ update msg model =
             ( model, Cmd.none )
 
         FileChange newModel ->
-            let
-                file =
-                    newModel.currentFile
-
-                file_ =
-                    { file | sch = get file.id file.sch }
-            in
-            ( { model | currentFile = file_, anchorsModels = newModel.anchorsModels }, Cmd.none )
+            ( { model | currentFile = newModel.currentFile, anchorsModels = newModel.anchorsModels }, Cmd.none )
 
         PostSch postsch ->
             let
-                file =
+                newfile =
                     model.currentFile
 
-                newSchema =
-                    replaceSch file.sch postsch
-
-                newfile =
-                    { file | sch = newSchema }
+                -- newSchema =
+                --     replaceSch file.sch postsch
+                -- newfile =
+                --     { file | sch = newSchema }
             in
             ( { model | currentFile = newfile }, Cmd.none )
 
@@ -538,23 +524,24 @@ type alias Config msg =
     { fileId : String, level : Int, tab : Int, toMsg : msg, parentHead : Sch, path : String, refs : AnchorsModels }
 
 
+initMeta model k =
+    { fileId = model.currentFile.id
+    , level = 1
+    , tab = 1
+    , toMsg = Noop
+    , parentHead = anyRecord
+    , path = "[" ++ k ++ "]"
+    , refs = model.anchorsModels
+    }
+
+
 viewModule : Model -> Html Msg
 viewModule model =
     let
         modelFile =
             model.currentFile
-
-        initMeta =
-            { fileId = modelFile.id
-            , level = 0
-            , tab = 1
-            , toMsg = Noop
-            , parentHead = anyRecord
-            , path = ""
-            , refs = model.anchorsModels
-            }
     in
-    div
+    Keyed.ul
         [ id modelFile.id
         , class "grid grid-cols-fit py-6 h-full gap-4 _model_number"
         , attribute "phx-capture-click" "select_sch"
@@ -562,46 +549,55 @@ viewModule model =
         , attribute "data-group" "body"
         , attribute "data-indent" "1.25rem"
         ]
-        (viewItself (Fmodel modelFile.id modelFile.sch) initMeta)
+        (List.map (viewFmodel (initMeta model)) modelFile.fmodels)
 
 
-viewModel : Fmodel -> Config msg -> Html msg
-viewModel ({ sch } as fmodel) ui =
-    case sch.type_ of
-        TRecord recordFields ->
-            lazy2 viewFolder fmodel ui
+viewFmodel : (String -> Config msg) -> Fmodel -> ( String, Html msg )
+viewFmodel toUI fmodel =
+    ( fmodel.key, lazy2 viewModel (toUI fmodel.key) fmodel )
 
-        TList sch_ ->
-            lazy2 viewFolder fmodel ui
 
-        TTuple schs ->
-            lazy2 viewFolder fmodel ui
+viewModel : Config msg -> Fmodel -> Html msg
+viewModel ui fmodel =
+    case fmodel.sch.type_ of
+        TRecord _ ->
+            viewFolder fmodel ui
 
-        TUnion schs ->
-            lazy2 viewFolder fmodel ui
+        TList _ ->
+            viewFolder fmodel ui
 
-        TLeaf leaf ->
-            lazy2 viewLeaf fmodel ui
+        TTuple _ ->
+            viewFolder fmodel ui
 
-        TRef ref ->
-            lazy2 viewLeaf fmodel ui
+        TUnion _ ->
+            viewFolder fmodel ui
 
-        TValue json ->
-            lazy2 viewLeaf fmodel ui
+        TLeaf _ ->
+            viewLeaf fmodel ui
+
+        TRef _ ->
+            viewLeaf fmodel ui
+
+        TValue _ ->
+            viewLeaf fmodel ui
 
         TAny ->
-            lazy2 viewLeaf fmodel ui
+            viewLeaf fmodel ui
 
 
 viewFolder : Fmodel -> Config msg -> Html msg
 viewFolder fmodel ({ level, tab } as ui) =
+    -- let
+    --     _ =
+    --         Debug.log "path" ui.path
+    -- in
     li [ id ui.path, classList [ ( "sort-handle", True ), ( "bg-dark-gray rounded py-4 shadow", level == 1 ) ] ]
         [ details [ attribute "open" "open" ]
             [ summary [ class "flex flex-col" ] [ viewFolderHeader fmodel ui ]
             , Keyed.ul
-                [ attribute "data-indent" (String.concat [ String.fromFloat (toFloat (level + 1) * 1.25), "rem" ])
+                [ attribute "data-indent" (String.concat [ String.fromFloat (toFloat level * 1.25), "rem" ])
                 ]
-                (List.map (\html -> ( ui.path, html )) (viewItself fmodel ui))
+                (viewItself ui fmodel)
             ]
         ]
 
@@ -620,77 +616,76 @@ viewFolderHeader fmodel ui =
         ]
 
 
-viewItself : Fmodel -> Config msg -> List (Html msg)
-viewItself ({ key, sch } as fmodel) ui =
-    case sch.type_ of
-        TRecord fields ->
-            viewRecord viewModel fields ui
+viewItself : Config msg -> Fmodel -> List ( String, Html msg )
+viewItself ui fmodel =
+    -- let
+    --     _ =
+    --         Debug.log "path" ui.path
+    -- in
+    case fmodel.sch.type_ of
+        TRecord r ->
+            List.map (\k -> ( k, walkRecord r.fields ui k )) r.order
 
         TList sch_ ->
             if sch_.type_ == TAny then
                 []
 
             else
-                viewList viewModel [ sch_ ] ui
+                viewList [ sch_ ] ui
 
         TTuple schs ->
-            viewList viewModel schs ui
+            viewList schs ui
 
         TUnion schs ->
-            viewUnion viewModel schs ui
+            viewUnion schs ui
 
         _ ->
             []
 
 
-viewRecord : (Fmodel -> Config msg -> a) -> RecordFields -> Config msg -> List a
-viewRecord mapFn { fields, order } ui =
+toViewModel nextUI k sch_ =
+    viewModel (nextUI k) (Fmodel k sch_)
+
+
+nextRecordUI ui k =
+    { ui
+        | level = ui.level + 1
+        , parentHead = anyRecord
+        , path = ui.path ++ "[" ++ k ++ "]"
+    }
+
+
+walkRecord fields ui k =
+    Dict.get k fields
+        |> Maybe.withDefault any
+        |> toViewModel (nextRecordUI ui) k
+
+
+walkList : (String -> Config msg) -> Int -> Sch -> Html msg
+walkList nextUI i sch_ =
     let
-        nextUI k =
-            { ui
-                | level = ui.level + 1
-                , parentHead = anyRecord
-                , path = ui.path ++ "[" ++ k ++ "]"
-            }
-
-        walk k =
-            Dict.get k fields
-                |> Maybe.withDefault any
-                |> (\sch_ -> mapFn (Fmodel k sch_) (nextUI k))
+        index =
+            String.fromInt i
     in
-    List.map walk order
+    viewModel (nextUI index) (Fmodel index sch_)
 
 
-viewList : (Fmodel -> Config msg -> a) -> List Sch -> Config msg -> List a
-viewList mapFn schs ui =
-    let
-        nextUI i =
-            { ui | level = ui.level + 1, parentHead = listAny, path = ui.path ++ "[]" ++ "[" ++ i ++ "]" }
-
-        walk i sch_ =
-            let
-                index =
-                    String.fromInt i
-            in
-            mapFn (Fmodel index sch_) (nextUI index)
-    in
-    List.indexedMap walk schs
+nextListUI ui i =
+    { ui | level = ui.level + 1, parentHead = listAny, path = ui.path ++ "[]" ++ "[" ++ i ++ "]" }
 
 
-viewUnion : (Fmodel -> Config msg -> a) -> List Sch -> Config msg -> List a
-viewUnion mapFn schs ui =
-    let
-        nextUI i =
-            { ui | level = ui.level + 1, parentHead = emptyUnion, path = ui.path ++ "[]" ++ "[" ++ i ++ "]" }
+viewList : List Sch -> Config msg -> List ( String, Html msg )
+viewList schs ui =
+    List.indexedMap (\i sch_ -> ( String.fromInt i, walkList (nextListUI ui) i sch_ )) schs
 
-        walk i sch_ =
-            let
-                index =
-                    String.fromInt i
-            in
-            mapFn (Fmodel index sch_) (nextUI index)
-    in
-    List.indexedMap walk schs
+
+nextUnionUI ui i =
+    { ui | level = ui.level + 1, parentHead = emptyUnion, path = ui.path ++ "[]" ++ "[" ++ i ++ "]" }
+
+
+viewUnion : List Sch -> Config msg -> List ( String, Html msg )
+viewUnion schs ui =
+    List.indexedMap (\i sch_ -> ( String.fromInt i, walkList (nextUnionUI ui) i sch_ )) schs
 
 
 viewLeaf : Fmodel -> Config msg -> Html msg
@@ -764,7 +759,7 @@ viewKey fmodel ui =
 
 view_key_ : Fmodel -> Config msg -> List (Html msg)
 view_key_ sch ({ level, tab } as ui) =
-    if level == tab then
+    if level == 1 then
         viewTopKey sch ui
 
     else
