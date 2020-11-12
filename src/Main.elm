@@ -7,6 +7,7 @@ import Html.Attributes exposing (attribute, autofocus, class, classList, id, lis
 import Html.Events exposing (onClick, preventDefaultOn)
 import Html.Keyed as Keyed
 import Html.Lazy exposing (lazy, lazy2, lazy3)
+import InfiniteList
 import Json.Decode as D exposing (Decoder, Value, succeed)
 import Json.Decode.Extra as DE
 import Json.Encode as E
@@ -30,6 +31,7 @@ type alias Sch =
     , title : String
     , description : String
     , examples : List D.Value
+    , height : Int
     , anchor : Maybe String
     }
 
@@ -72,6 +74,7 @@ type alias AnchorsModels =
 type alias Model =
     { currentFile : SchFile
     , anchorsModels : AnchorsModels
+    , infiniteList : InfiniteList.Model
     }
 
 
@@ -80,6 +83,7 @@ mainDecoder =
     D.succeed Model
         |> DE.andMap (D.field "currentFile" schFileDecoder)
         |> DE.andMap (D.field "anchorsModels" anchorsModelsDecoder)
+        |> DE.andMap (D.succeed InfiniteList.init)
 
 
 anchorsModelsDecoder : Decoder AnchorsModels
@@ -112,6 +116,7 @@ schDecoder =
         |> DE.andMap (D.field "title" D.string |> DE.withDefault "")
         |> DE.andMap (D.field "description" D.string |> DE.withDefault "")
         |> DE.andMap (D.field "examples" (D.list D.value) |> DE.withDefault [])
+        |> DE.andMap (D.field "height" D.int |> DE.withDefault 0)
         |> DE.andMap (D.maybe (D.field "$anchor" D.string))
 
 
@@ -189,64 +194,50 @@ whichLeaf t =
             TNull
 
 
-null : Sch
-null =
-    { type_ = TLeaf TNull
-    , title = ""
-    , description = ""
-    , examples = [ E.null ]
-    , anchor = Nothing
-    }
-
-
 any : Sch
 any =
     { type_ = TAny
     , title = ""
     , description = ""
-    , examples = []
+    , examples = [ E.null ]
+    , height = 0
     , anchor = Nothing
     }
+
+
+null : Sch
+null =
+    { any | type_ = TLeaf TNull }
 
 
 anyRecord : Sch
 anyRecord =
-    { type_ = TRecord (RecordFields Dict.empty [])
-    , title = ""
-    , description = ""
-    , examples = []
-    , anchor = Nothing
-    }
+    { any | type_ = TRecord (RecordFields Dict.empty []) }
 
 
 listAny : Sch
 listAny =
-    { type_ = TList any
-    , title = ""
-    , description = ""
-    , examples = []
-    , anchor = Nothing
-    }
+    { any | type_ = TList any }
 
 
 emptyUnion : Sch
 emptyUnion =
-    { type_ = TUnion []
-    , title = ""
-    , description = ""
-    , examples = []
-    , anchor = Nothing
-    }
+    { any | type_ = TUnion [] }
 
 
 init : D.Value -> ( Model, Cmd Msg )
 init json =
     case D.decodeValue mainDecoder json of
         Ok model ->
-            ( { currentFile = model.currentFile, anchorsModels = model.anchorsModels }, Cmd.none )
+            ( { currentFile = model.currentFile
+              , anchorsModels = model.anchorsModels
+              , infiniteList = InfiniteList.init
+              }
+            , Cmd.none
+            )
 
         Err err ->
-            ( { currentFile = SchFile "" [], anchorsModels = [] }, Cmd.none )
+            ( { currentFile = SchFile "" [], anchorsModels = [], infiniteList = InfiniteList.init }, Cmd.none )
 
 
 type alias PatchPayload =
@@ -494,6 +485,9 @@ update msg model =
         Noop ->
             ( model, Cmd.none )
 
+        InfiniteListMsg infModel ->
+            ( { model | infiniteList = infModel }, Cmd.none )
+
         FileChange newModel ->
             ( { model | currentFile = newModel.currentFile, anchorsModels = newModel.anchorsModels }, Cmd.none )
 
@@ -518,6 +512,7 @@ type Msg
     = Noop
     | PostSch PatchPayload
     | FileChange Model
+    | InfiniteListMsg InfiniteList.Model
 
 
 type alias Config msg =
@@ -535,26 +530,55 @@ initMeta model k =
     }
 
 
-viewModule : Model -> Html Msg
-viewModule model =
-    let
-        modelFile =
-            model.currentFile
-    in
-    Keyed.ul
+itemHeight : Int -> ( Config msg, Fmodel ) -> Int
+itemHeight idx ( _, item ) =
+    item.sch.height
+
+
+containerHeight : Int
+containerHeight =
+    30000
+
+
+infConfig : InfiniteList.Config ( Config msg, Fmodel ) msg
+infConfig =
+    InfiniteList.config
+        { itemView = viewFmodel
+        , itemHeight = InfiniteList.withVariableHeight itemHeight
+        , containerHeight = containerHeight
+        }
+
+
+customContainer : SchFile -> List ( String, String ) -> List (Html Msg) -> Html Msg
+customContainer modelFile styles children =
+    ul
         [ id modelFile.id
         , class "grid grid-cols-fit py-6 h-full gap-4 _model_number"
         , attribute "phx-capture-click" "select_sch"
         , attribute "phx-value-paths" modelFile.id
         , attribute "data-group" "body"
         , attribute "data-indent" "1.25rem"
+        , style "overflow" "scroll"
+        , InfiniteList.onScroll InfiniteListMsg
         ]
-        (List.map (viewFmodel (initMeta model)) modelFile.fmodels)
+        children
 
 
-viewFmodel : (String -> Config msg) -> Fmodel -> ( String, Html msg )
-viewFmodel toUI fmodel =
-    ( fmodel.key, lazy2 viewModel (toUI fmodel.key) fmodel )
+viewModule : Model -> Html Msg
+viewModule model =
+    let
+        modelFile =
+            model.currentFile
+
+        items =
+            List.map (\fmodel -> ( initMeta model fmodel.key, fmodel )) modelFile.fmodels
+    in
+    InfiniteList.view (infConfig |> InfiniteList.withCustomContainer (customContainer modelFile)) model.infiniteList items
+
+
+viewFmodel : Int -> Int -> ( Config msg, Fmodel ) -> Html msg
+viewFmodel idx listIdx ( ui, fmodel ) =
+    lazy2 viewModel ui fmodel
 
 
 viewModel : Config msg -> Fmodel -> Html msg
