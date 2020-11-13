@@ -1,17 +1,18 @@
 port module Main exposing (..)
 
 import Browser
+import Browser.Dom exposing (getViewportOf)
 import Dict exposing (Dict)
 import Html exposing (..)
 import Html.Attributes exposing (attribute, autofocus, class, classList, id, list, style, type_)
-import Html.Events exposing (onClick, preventDefaultOn)
+import Html.Events exposing (on, onClick, preventDefaultOn, stopPropagationOn)
 import Html.Keyed as Keyed
 import Html.Lazy exposing (lazy, lazy2, lazy3)
-import InfiniteList
 import Json.Decode as D exposing (Decoder, Value, succeed)
 import Json.Decode.Extra as DE
 import Json.Encode as E
 import Regex
+import Task
 
 
 port stateUpdate : (D.Value -> msg) -> Sub msg
@@ -31,7 +32,9 @@ type alias Sch =
     , title : String
     , description : String
     , examples : List D.Value
-    , height : Int
+    , index : Int
+    , height : Float
+    , offset : Float
     , anchor : Maybe String
     }
 
@@ -64,6 +67,7 @@ type LeafType
 type alias SchFile =
     { id : String
     , fmodels : List Fmodel
+    , vfmodels : List Fmodel
     }
 
 
@@ -74,7 +78,6 @@ type alias AnchorsModels =
 type alias Model =
     { currentFile : SchFile
     , anchorsModels : AnchorsModels
-    , infiniteList : InfiniteList.Model
     }
 
 
@@ -83,7 +86,6 @@ mainDecoder =
     D.succeed Model
         |> DE.andMap (D.field "currentFile" schFileDecoder)
         |> DE.andMap (D.field "anchorsModels" anchorsModelsDecoder)
-        |> DE.andMap (D.succeed InfiniteList.init)
 
 
 anchorsModelsDecoder : Decoder AnchorsModels
@@ -99,6 +101,7 @@ schFileDecoder =
     D.succeed SchFile
         |> DE.andMap (D.field "id" D.string)
         |> DE.andMap (D.field "fmodels" schsDecoder)
+        |> DE.andMap (D.field "fmodels" schsDecoder |> D.andThen (D.succeed << List.take 10))
 
 
 schsDecoder : Decoder (List Fmodel)
@@ -116,7 +119,9 @@ schDecoder =
         |> DE.andMap (D.field "title" D.string |> DE.withDefault "")
         |> DE.andMap (D.field "description" D.string |> DE.withDefault "")
         |> DE.andMap (D.field "examples" (D.list D.value) |> DE.withDefault [])
-        |> DE.andMap (D.field "height" D.int |> DE.withDefault 0)
+        |> DE.andMap (D.field "index" D.int |> DE.withDefault 0)
+        |> DE.andMap (D.field "height" D.float |> DE.withDefault 0)
+        |> DE.andMap (D.field "offset" D.float |> DE.withDefault 0)
         |> DE.andMap (D.maybe (D.field "$anchor" D.string))
 
 
@@ -200,7 +205,9 @@ any =
     , title = ""
     , description = ""
     , examples = [ E.null ]
+    , index = 0
     , height = 0
+    , offset = 0
     , anchor = Nothing
     }
 
@@ -231,13 +238,12 @@ init json =
         Ok model ->
             ( { currentFile = model.currentFile
               , anchorsModels = model.anchorsModels
-              , infiniteList = InfiniteList.init
               }
             , Cmd.none
             )
 
         Err err ->
-            ( { currentFile = SchFile "" [], anchorsModels = [], infiniteList = InfiniteList.init }, Cmd.none )
+            ( { currentFile = SchFile "" [] [], anchorsModels = [] }, Cmd.none )
 
 
 type alias PatchPayload =
@@ -255,25 +261,24 @@ postschDecoder =
         |> DE.andMap (D.field "sch" schDecoder)
 
 
-replaceSch : Sch -> PatchPayload -> Sch
-replaceSch schema { id, path, sch } =
-    let
-        path_ =
-            String.replace id "" path
-    in
-    getAndUpdate path_ (always sch) schema |> Tuple.second
+
+-- replaceSch : Sch -> PatchPayload -> Sch
+-- replaceSch schema { id, path, sch } =
+--     let
+--         path_ =
+--             String.replace id "" path
+--     in
+--     getAndUpdate path_ (always sch) schema |> Tuple.second
+-- get : String -> Sch -> Sch
+-- get path sch =
+--     getAndUpdate path identity sch |> Tuple.first
 
 
-get : String -> Sch -> Sch
-get path sch =
-    getAndUpdate path identity sch |> Tuple.first
-
-
-getAndUpdate : String -> (Sch -> Sch) -> Sch -> ( Sch, Sch )
-getAndUpdate path f sch =
+getAndUpdate : String -> (Sch -> Sch) -> Fmodel -> ( Sch, Sch )
+getAndUpdate path f { key, sch } =
     let
         acc =
-            { level = 0, parentHead = anyRecord, path = "", result = Nothing, key = "", sch = sch }
+            { level = 0, parentHead = anyRecord, path = "[" ++ key ++ "]", result = Nothing, key = "", sch = sch }
 
         toReduce sch_ acc_ =
             let
@@ -479,14 +484,110 @@ mapReduce f sch acc =
             f sch { acc | sch = sch }
 
 
+
+-- [(0, "0px"), (1, "10px"), (2, "80px"), (3, "2000px"), (4, "100px")]
+
+
+virtualizeList : Browser.Dom.Viewport -> List Fmodel -> List Fmodel
+virtualizeList container list =
+    let
+        minIndex =
+            0
+
+        maxIndex =
+            List.length list - 1
+
+        viewport =
+            list
+                |> List.filter (\fmodel -> container.viewport.y <= fmodel.sch.offset)
+                |> List.filter (\fmodel -> (container.viewport.y + container.viewport.height) >= fmodel.sch.offset)
+
+        tolerance =
+            2
+    in
+    case viewport of
+        [] ->
+            []
+
+        [ single ] ->
+            [ single ]
+
+        multiple ->
+            let
+                firstIndex =
+                    List.head multiple
+                        |> Maybe.withDefault (Fmodel "" any)
+                        |> (.sch >> .index)
+
+                lastIndex =
+                    List.head (List.reverse multiple)
+                        |> Maybe.withDefault (Fmodel "" any)
+                        |> (.sch >> .index)
+
+                frontIndex =
+                    max minIndex (firstIndex - tolerance)
+
+                rearIndex =
+                    min (lastIndex + tolerance) maxIndex
+            in
+            List.filter (\fmodel -> fmodel.sch.index >= frontIndex && fmodel.sch.index <= rearIndex) list
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
         Noop ->
             ( model, Cmd.none )
 
-        InfiniteListMsg infModel ->
-            ( { model | infiniteList = infModel }, Cmd.none )
+        Select path ->
+            let
+                modelFile =
+                    model.currentFile
+
+                vfmodels =
+                    List.map
+                        (\vfmodel ->
+                            if String.startsWith ("[" ++ vfmodel.key ++ "]") path then
+                                { vfmodel | sch = getAndUpdate path (\sch -> { sch | title = "red" }) vfmodel |> Tuple.second }
+
+                            else
+                                vfmodel
+                        )
+                        modelFile.vfmodels
+
+                newModelFile =
+                    { modelFile | vfmodels = vfmodels }
+            in
+            ( { model | currentFile = newModelFile }, Cmd.none )
+
+        Scroll ->
+            ( model, Task.attempt ViewPortOf (getViewportOf model.currentFile.id) )
+
+        ViewPortOf (Ok viewport) ->
+            let
+                -- _ =
+                --     Debug.log "viewport" viewport
+                modelFile =
+                    model.currentFile
+
+                newVfmodel =
+                    case virtualizeList viewport modelFile.fmodels of
+                        [] ->
+                            modelFile.vfmodels
+
+                        [ v ] ->
+                            v :: modelFile.vfmodels |> List.sortBy (\fmodel -> fmodel.sch.index)
+
+                        vfmodels ->
+                            vfmodels
+
+                newFile =
+                    { modelFile | vfmodels = newVfmodel }
+            in
+            ( { model | currentFile = newFile }, Cmd.none )
+
+        ViewPortOf (Err id) ->
+            ( model, Cmd.none )
 
         FileChange newModel ->
             ( { model | currentFile = newModel.currentFile, anchorsModels = newModel.anchorsModels }, Cmd.none )
@@ -512,11 +613,13 @@ type Msg
     = Noop
     | PostSch PatchPayload
     | FileChange Model
-    | InfiniteListMsg InfiniteList.Model
+    | Scroll
+    | ViewPortOf (Result Browser.Dom.Error Browser.Dom.Viewport)
+    | Select String
 
 
 type alias Config msg =
-    { fileId : String, level : Int, tab : Int, toMsg : msg, parentHead : Sch, path : String, refs : AnchorsModels }
+    { fileId : String, level : Int, tab : Int, toMsg : msg, toSelect : String -> msg, parentHead : Sch, path : String, refs : AnchorsModels }
 
 
 initMeta model k =
@@ -524,44 +627,11 @@ initMeta model k =
     , level = 1
     , tab = 1
     , toMsg = Noop
+    , toSelect = Select
     , parentHead = anyRecord
     , path = "[" ++ k ++ "]"
     , refs = model.anchorsModels
     }
-
-
-itemHeight : Int -> ( Config msg, Fmodel ) -> Int
-itemHeight idx ( _, item ) =
-    item.sch.height
-
-
-containerHeight : Int
-containerHeight =
-    30000
-
-
-infConfig : InfiniteList.Config ( Config msg, Fmodel ) msg
-infConfig =
-    InfiniteList.config
-        { itemView = viewFmodel
-        , itemHeight = InfiniteList.withVariableHeight itemHeight
-        , containerHeight = containerHeight
-        }
-
-
-customContainer : SchFile -> List ( String, String ) -> List (Html Msg) -> Html Msg
-customContainer modelFile styles children =
-    ul
-        [ id modelFile.id
-        , class "grid grid-cols-fit py-6 h-full gap-4 _model_number"
-        , attribute "phx-capture-click" "select_sch"
-        , attribute "phx-value-paths" modelFile.id
-        , attribute "data-group" "body"
-        , attribute "data-indent" "1.25rem"
-        , style "overflow" "scroll"
-        , InfiniteList.onScroll InfiniteListMsg
-        ]
-        children
 
 
 viewModule : Model -> Html Msg
@@ -570,15 +640,37 @@ viewModule model =
         modelFile =
             model.currentFile
 
-        items =
-            List.map (\fmodel -> ( initMeta model fmodel.key, fmodel )) modelFile.fmodels
+        fmodelsCount =
+            List.length modelFile.fmodels - 1
+
+        totalHeight =
+            modelFile.fmodels
+                |> List.foldl (\fmodel _ -> fmodel.sch.offset) 0
+                |> String.fromFloat
+
+        first =
+            List.head modelFile.vfmodels |> Maybe.withDefault (Fmodel "" any)
+
+        firstOffset =
+            String.fromFloat first.sch.offset
     in
-    InfiniteList.view (infConfig |> InfiniteList.withCustomContainer (customContainer modelFile)) model.infiniteList items
+    main_ [ id modelFile.id, class "overflow-y-scroll overscroll-y-none h-full relative", on "scroll" (D.succeed Scroll) ]
+        [ Keyed.ul
+            [ class "flex flex-col py-6 gap-2 _model_number w-full absolute"
+            , attribute "phx-capture-click" "select_sch"
+            , attribute "phx-value-paths" modelFile.id
+            , attribute "data-group" "body"
+            , attribute "data-indent" "1.25rem"
+            , style "height" (totalHeight ++ "px")
+            , style "padding-top" (firstOffset ++ "px")
+            ]
+            (List.map (viewFmodel (initMeta model)) modelFile.vfmodels)
+        ]
 
 
-viewFmodel : Int -> Int -> ( Config msg, Fmodel ) -> Html msg
-viewFmodel idx listIdx ( ui, fmodel ) =
-    lazy2 viewModel ui fmodel
+viewFmodel : (String -> Config msg) -> Fmodel -> ( String, Html msg )
+viewFmodel toUI fmodel =
+    ( fmodel.key, lazy2 viewModel (toUI fmodel.key) fmodel )
 
 
 viewModel : Config msg -> Fmodel -> Html msg
@@ -609,13 +701,23 @@ viewModel ui fmodel =
             viewLeaf fmodel ui
 
 
+stopPropagationOnClick : msg -> Attribute msg
+stopPropagationOnClick message =
+    stopPropagationOn "click" (D.map (\m -> ( m, True )) (D.succeed message))
+
+
 viewFolder : Fmodel -> Config msg -> Html msg
 viewFolder fmodel ({ level, tab } as ui) =
     -- let
     --     _ =
     --         Debug.log "path" ui.path
     -- in
-    li [ id ui.path, classList [ ( "sort-handle", True ), ( "bg-dark-gray rounded py-4 shadow", level == 1 ) ] ]
+    li
+        [ id ui.path
+        , classList [ ( "sort-handle", True ), ( "bg-red-500", fmodel.sch.title == "red" ), ( "bg-dark-gray rounded py-4 shadow", level == 1 ) ]
+        , stopPropagationOnClick (ui.toSelect ui.path)
+        , attribute "data-offset" (String.fromFloat fmodel.sch.offset)
+        ]
         [ details [ attribute "open" "open" ]
             [ summary [ class "flex flex-col" ] [ viewFolderHeader fmodel ui ]
             , Keyed.ul
